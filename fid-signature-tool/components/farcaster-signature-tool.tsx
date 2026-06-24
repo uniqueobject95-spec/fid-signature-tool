@@ -405,6 +405,7 @@ export function FarcasterSignatureTool() {
         client = createWalletClient({
           chain: optimism,
           account: pkeyAccount,
+          transport: http(),
         });
       } else {
         // Execute with connected wallet
