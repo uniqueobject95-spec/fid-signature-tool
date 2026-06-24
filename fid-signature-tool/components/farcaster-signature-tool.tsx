@@ -414,6 +414,23 @@ export function FarcasterSignatureTool() {
           transport: custom(window.ethereum!),
           account,
         });
+
+        // Ensure the wallet is on Optimism (the IdRegistry lives on OP Mainnet).
+        // Wallets like Base App / Toshi often default to Base (8453).
+        const currentChainId = await client.getChainId();
+        if (currentChainId !== optimism.id) {
+          try {
+            await client.switchChain({ id: optimism.id });
+          } catch (switchErr: any) {
+            // 4902 = chain not added to the wallet yet; add it then switch.
+            if (switchErr?.code === 4902 || switchErr?.cause?.code === 4902) {
+              await client.addChain({ chain: optimism });
+              await client.switchChain({ id: optimism.id });
+            } else {
+              throw switchErr;
+            }
+          }
+        }
       }
 
       console.log('[v0] Executing transferAndChangeRecovery with:', {
