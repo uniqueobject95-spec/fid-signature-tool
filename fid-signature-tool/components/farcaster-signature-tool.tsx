@@ -12,7 +12,6 @@ import {
   http,
   type Address,
   type Hash,
-  decodeAbiParameters,
 } from 'viem';
 import { optimism } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
@@ -26,62 +25,8 @@ const ID_REGISTRY_ABI = parseAbi([
   'function idOf(address addr) public view returns (uint256)',
 ]);
 
-// Helper to extract raw signature data if it's ABI-encoded
-// When wallets like BaseApp return signatures, they might be wrapped in ABI encoding
-const extractSignatureData = (sig: string): string => {
-  if (!sig || sig === '0x') {
-    console.log('[v0] Empty signature provided');
-    return sig;
-  }
-
-  console.log('[v0] Original signature length:', sig.length, 'starts:', sig.slice(0, 20));
-
-  try {
-    // If the signature is extremely long (>1000 chars), it's likely ABI-encoded with nested data
-    if (sig.length > 500 && sig.startsWith('0x')) {
-      console.log('[v0] Signature is very long, likely ABI-encoded, attempting decode');
-      try {
-        // Try to decode as ABI-encoded bytes
-        const decoded = decodeAbiParameters(
-          [{ type: 'bytes' }],
-          sig as `0x${string}`
-        );
-        
-        if (decoded && decoded[0]) {
-          const extractedSig = decoded[0] as string;
-          console.log('[v0] Decoded successfully, new length:', extractedSig.length, 'starts:', extractedSig.slice(0, 20));
-          
-          // If the extracted signature is still extremely long, it might have been nested
-          // Try one more level of decoding
-          if (extractedSig.length > 500) {
-            try {
-              const decodedAgain = decodeAbiParameters(
-                [{ type: 'bytes' }],
-                extractedSig as `0x${string}`
-              );
-              if (decodedAgain && decodedAgain[0]) {
-                const finalSig = decodedAgain[0] as string;
-                console.log('[v0] Second decode successful, final length:', finalSig.length);
-                return finalSig;
-              }
-            } catch (e) {
-              console.log('[v0] Second decode failed, using first decode result');
-            }
-          }
-          
-          return extractedSig;
-        }
-      } catch (decodeErr) {
-        console.log('[v0] ABI decode failed:', decodeErr instanceof Error ? decodeErr.message : 'Unknown error');
-      }
-    }
-  } catch (e) {
-    console.log('[v0] Error in extractSignatureData:', e instanceof Error ? e.message : e);
-  }
-
-  console.log('[v0] Using signature as-is');
-  return sig;
-};
+// No signature extraction needed - just use the raw signature from the wallet
+// The wallet should return properly formatted signatures
 
 interface TransferData {
   recipientAddress: Address;
@@ -384,53 +329,61 @@ export function FarcasterSignatureTool() {
         // Sign the message using connected wallet
         const deadline = Math.floor(Date.now() / 1000) + 3600;
 
-        const signature = await window.ethereum!.request({
-          method: 'eth_signTypedData_v4',
-          params: [
-            recipientAddr,
-            JSON.stringify({
-              domain: {
-                name: 'Farcaster IdRegistry',
-                version: '1',
-                chainId: 10,
-                verifyingContract: ID_REGISTRY_ADDRESS,
-              },
-              types: {
-                TransferAndChangeRecovery: [
-                  { name: 'fid', type: 'uint256' },
-                  { name: 'to', type: 'address' },
-                  { name: 'recovery', type: 'address' },
-                  { name: 'nonce', type: 'uint256' },
-                  { name: 'deadline', type: 'uint256' },
-                ],
-              },
-              primaryType: 'TransferAndChangeRecovery',
-              message: {
-                fid: currentFid!.toString(),
-                to: recipientAddr,
-                recovery: recoveryAddress as Address,
-                nonce: nonce.toString(),
-                deadline: deadline.toString(),
-              },
-            }),
-          ],
-        });
+        try {
+          const signature = await window.ethereum!.request({
+            method: 'eth_signTypedData_v4',
+            params: [
+              recipientAddr,
+              JSON.stringify({
+                domain: {
+                  name: 'Farcaster IdRegistry',
+                  version: '1',
+                  chainId: 10,
+                  verifyingContract: ID_REGISTRY_ADDRESS,
+                },
+                types: {
+                  TransferAndChangeRecovery: [
+                    { name: 'fid', type: 'uint256' },
+                    { name: 'to', type: 'address' },
+                    { name: 'recovery', type: 'address' },
+                    { name: 'nonce', type: 'uint256' },
+                    { name: 'deadline', type: 'uint256' },
+                  ],
+                },
+                primaryType: 'TransferAndChangeRecovery',
+                message: {
+                  fid: `${currentFid!}`,
+                  to: recipientAddr,
+                  recovery: recoveryAddress as Address,
+                  nonce: `${nonce}`,
+                  deadline: `${deadline}`,
+                },
+              }),
+            ],
+          });
 
-        console.log('[v0] Signature received from wallet:', {
-          type: typeof signature,
-          length: (signature as string)?.length,
-          value: (signature as string)?.slice(0, 100),
-        });
+          if (!signature || signature === '0x') {
+            throw new Error('Wallet returned empty signature');
+          }
 
-        setTransferData({
-          recipientAddress: recipientAddr,
-          recipientNonce: nonce,
-          currentFid: currentFid!,
-          recoveryAddress: recoveryAddress as Address,
-          deadline,
-          signature: signature as string,
-        });
-        setRecipientSignedWithPrivateKey(false);
+          console.log('[v0] Signature received from wallet:', {
+            type: typeof signature,
+            length: (signature as string).length,
+            value: (signature as string).slice(0, 100),
+          });
+
+          setTransferData({
+            recipientAddress: recipientAddr,
+            recipientNonce: nonce,
+            currentFid: currentFid!,
+            recoveryAddress: recoveryAddress as Address,
+            deadline,
+            signature: signature as string,
+          });
+          setRecipientSignedWithPrivateKey(false);
+        } catch (walletErr) {
+          throw new Error(`Wallet signature failed: ${walletErr instanceof Error ? walletErr.message : 'Unknown error'}`);
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to generate signature');
@@ -562,31 +515,14 @@ export function FarcasterSignatureTool() {
         });
       }
 
-      // Extract and decode signature if it's ABI-encoded
-      console.log('[v0] Before extract - transferData.signature:', {
-        type: typeof transferData.signature,
-        length: transferData.signature?.length,
-        isEmpty: transferData.signature === '0x',
-        value: transferData.signature?.slice(0, 50),
-      });
-
-      const finalSignature = extractSignatureData(transferData.signature);
-
-      console.log('[v0] After extract - finalSignature:', {
-        type: typeof finalSignature,
-        length: finalSignature?.length,
-        isEmpty: finalSignature === '0x',
-        value: finalSignature?.slice(0, 50),
-      });
-
       console.log('[v0] Executing transferAndChangeRecovery with:', {
         to: transferData.recipientAddress,
         recovery: transferData.recoveryAddress,
         deadline: transferData.deadline,
         fid: transferData.currentFid,
         nonce: transferData.recipientNonce,
-        signatureLength: finalSignature?.length,
-        signatureStart: finalSignature?.slice(0, 30),
+        signatureLength: transferData.signature?.length,
+        signatureStart: transferData.signature?.slice(0, 30),
         executionMethod,
         executor: account,
       });
@@ -599,7 +535,7 @@ export function FarcasterSignatureTool() {
           transferData.recipientAddress,
           transferData.recoveryAddress,
           BigInt(transferData.deadline),
-          finalSignature as `0x${string}`,
+          transferData.signature as `0x${string}`,
         ],
       });
 
