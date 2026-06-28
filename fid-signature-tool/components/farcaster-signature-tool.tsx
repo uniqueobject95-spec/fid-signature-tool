@@ -12,6 +12,7 @@ import {
   http,
   type Address,
   type Hash,
+  decodeAbiParameters,
 } from 'viem';
 import { optimism } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
@@ -24,6 +25,28 @@ const ID_REGISTRY_ABI = parseAbi([
   'function transferAndChangeRecovery(address to, address recovery, uint256 deadline, bytes calldata sig) public',
   'function idOf(address addr) public view returns (uint256)',
 ]);
+
+// Helper to decode signature if it's ABI-encoded as dynamic bytes
+// Some wallets (like Base App) return signatures ABI-encoded, which need to be decoded
+const decodeSignatureIfNeeded = (sig: string): string => {
+  try {
+    // Check if signature looks ABI-encoded (starts with 0x followed by 64 hex chars which is the offset 0x20)
+    if (sig.startsWith('0x0000000000000000000000000000000000000000000000000000000000000020')) {
+      console.log('[v0] Detected ABI-encoded signature, decoding...');
+      // Decode as dynamic bytes
+      const decoded = decodeAbiParameters(
+        [{ type: 'bytes' }],
+        sig as `0x${string}`
+      );
+      const rawSig = decoded[0];
+      console.log('[v0] Decoded signature:', rawSig);
+      return rawSig as string;
+    }
+  } catch (e) {
+    console.log('[v0] Could not decode signature, using as-is:', e);
+  }
+  return sig;
+};
 
 interface TransferData {
   recipientAddress: Address;
@@ -493,12 +516,16 @@ export function FarcasterSignatureTool() {
         });
       }
 
+      // Decode signature if it's ABI-encoded (some wallets like Base App encode it)
+      const decodedSignature = decodeSignatureIfNeeded(transferData.signature);
+
       console.log('[v0] Executing transferAndChangeRecovery with:', {
         to: transferData.recipientAddress,
         recovery: transferData.recoveryAddress,
         deadline: transferData.deadline,
         fid: transferData.currentFid,
         nonce: transferData.recipientNonce,
+        signature: decodedSignature,
         executionMethod,
         executor: account,
       });
@@ -511,7 +538,7 @@ export function FarcasterSignatureTool() {
           transferData.recipientAddress,
           transferData.recoveryAddress,
           BigInt(transferData.deadline),
-          transferData.signature as `0x${string}`,
+          decodedSignature as `0x${string}`,
         ],
       });
 
