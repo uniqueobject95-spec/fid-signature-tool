@@ -26,39 +26,60 @@ const ID_REGISTRY_ABI = parseAbi([
   'function idOf(address addr) public view returns (uint256)',
 ]);
 
-// Helper to decode signature if it's ABI-encoded as dynamic bytes
-// Some wallets (like Base App) return signatures ABI-encoded, which need to be decoded
-const decodeSignatureIfNeeded = (sig: string): string => {
-  console.log('[v0] Checking signature format:', sig.slice(0, 100));
-  
+// Helper to extract raw signature data if it's ABI-encoded
+// When wallets like BaseApp return signatures, they might be wrapped in ABI encoding
+const extractSignatureData = (sig: string): string => {
+  if (!sig || sig === '0x') {
+    console.log('[v0] Empty signature provided');
+    return sig;
+  }
+
+  console.log('[v0] Original signature length:', sig.length, 'starts:', sig.slice(0, 20));
+
   try {
-    // Check if signature looks ABI-encoded (starts with 0x and then offset markers)
-    // ABI-encoded dynamic bytes has structure: offset (32 bytes) + length (32 bytes) + data
-    if (sig.length > 130 && sig.startsWith('0x')) {
-      // Check if it looks like encoded data (has lots of zeros at the start suggesting offset/length encoding)
-      const withoutPrefix = sig.slice(2);
-      if (withoutPrefix.startsWith('0000000000000000000000000000000000000000000000000000000000000020')) {
-        console.log('[v0] Detected ABI-encoded signature, attempting to decode...');
-        try {
-          const decoded = decodeAbiParameters(
-            [{ type: 'bytes' }],
-            sig as `0x${string}`
-          );
-          const rawSig = decoded[0];
-          console.log('[v0] Successfully decoded signature:', rawSig?.slice(0, 20));
-          return rawSig as string;
-        } catch (decodeErr) {
-          console.log('[v0] Decode attempt failed:', decodeErr instanceof Error ? decodeErr.message : decodeErr);
-          console.log('[v0] Using signature as-is');
-          return sig;
+    // If the signature is extremely long (>1000 chars), it's likely ABI-encoded with nested data
+    if (sig.length > 500 && sig.startsWith('0x')) {
+      console.log('[v0] Signature is very long, likely ABI-encoded, attempting decode');
+      try {
+        // Try to decode as ABI-encoded bytes
+        const decoded = decodeAbiParameters(
+          [{ type: 'bytes' }],
+          sig as `0x${string}`
+        );
+        
+        if (decoded && decoded[0]) {
+          const extractedSig = decoded[0] as string;
+          console.log('[v0] Decoded successfully, new length:', extractedSig.length, 'starts:', extractedSig.slice(0, 20));
+          
+          // If the extracted signature is still extremely long, it might have been nested
+          // Try one more level of decoding
+          if (extractedSig.length > 500) {
+            try {
+              const decodedAgain = decodeAbiParameters(
+                [{ type: 'bytes' }],
+                extractedSig as `0x${string}`
+              );
+              if (decodedAgain && decodedAgain[0]) {
+                const finalSig = decodedAgain[0] as string;
+                console.log('[v0] Second decode successful, final length:', finalSig.length);
+                return finalSig;
+              }
+            } catch (e) {
+              console.log('[v0] Second decode failed, using first decode result');
+            }
+          }
+          
+          return extractedSig;
         }
+      } catch (decodeErr) {
+        console.log('[v0] ABI decode failed:', decodeErr instanceof Error ? decodeErr.message : 'Unknown error');
       }
     }
   } catch (e) {
-    console.log('[v0] Signature check error:', e instanceof Error ? e.message : e);
+    console.log('[v0] Error in extractSignatureData:', e instanceof Error ? e.message : e);
   }
-  
-  console.log('[v0] Using signature as-is, length:', sig.length);
+
+  console.log('[v0] Using signature as-is');
   return sig;
 };
 
@@ -530,10 +551,8 @@ export function FarcasterSignatureTool() {
         });
       }
 
-      // Decode signature if it's ABI-encoded (some wallets like Base App encode it)
-      console.log('[v0] Original signature from transferData:', transferData.signature?.slice(0, 100));
-      const decodedSignature = decodeSignatureIfNeeded(transferData.signature);
-      console.log('[v0] After decoding:', decodedSignature?.slice(0, 100));
+      // Extract and decode signature if it's ABI-encoded
+      const finalSignature = extractSignatureData(transferData.signature);
 
       console.log('[v0] Executing transferAndChangeRecovery with:', {
         to: transferData.recipientAddress,
@@ -541,8 +560,8 @@ export function FarcasterSignatureTool() {
         deadline: transferData.deadline,
         fid: transferData.currentFid,
         nonce: transferData.recipientNonce,
-        signatureLength: decodedSignature?.length,
-        signatureStart: decodedSignature?.slice(0, 20),
+        signatureLength: finalSignature?.length,
+        signatureStart: finalSignature?.slice(0, 30),
         executionMethod,
         executor: account,
       });
@@ -555,7 +574,7 @@ export function FarcasterSignatureTool() {
           transferData.recipientAddress,
           transferData.recoveryAddress,
           BigInt(transferData.deadline),
-          decodedSignature as `0x${string}`,
+          finalSignature as `0x${string}`,
         ],
       });
 
