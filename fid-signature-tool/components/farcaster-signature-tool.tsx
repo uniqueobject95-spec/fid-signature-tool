@@ -12,7 +12,6 @@ import {
   http,
   type Address,
   type Hash,
-  decodeAbiParameters,
 } from 'viem';
 import { optimism } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
@@ -25,28 +24,6 @@ const ID_REGISTRY_ABI = parseAbi([
   'function transferAndChangeRecovery(address to, address recovery, uint256 deadline, bytes calldata sig) public',
   'function idOf(address addr) public view returns (uint256)',
 ]);
-
-// Helper to decode signature if it's ABI-encoded as dynamic bytes
-// Some wallets (like Base App) return signatures ABI-encoded, which need to be decoded
-const decodeSignatureIfNeeded = (sig: string): string => {
-  try {
-    // Check if signature looks ABI-encoded (starts with 0x followed by 64 hex chars which is the offset 0x20)
-    if (sig.startsWith('0x0000000000000000000000000000000000000000000000000000000000000020')) {
-      console.log('[v0] Detected ABI-encoded signature, decoding...');
-      // Decode as dynamic bytes
-      const decoded = decodeAbiParameters(
-        [{ type: 'bytes' }],
-        sig as `0x${string}`
-      );
-      const rawSig = decoded[0];
-      console.log('[v0] Decoded signature:', rawSig);
-      return rawSig as string;
-    }
-  } catch (e) {
-    console.log('[v0] Could not decode signature, using as-is:', e);
-  }
-  return sig;
-};
 
 interface TransferData {
   recipientAddress: Address;
@@ -516,8 +493,16 @@ export function FarcasterSignatureTool() {
         });
       }
 
-      // Decode signature if it's ABI-encoded (some wallets like Base App encode it)
-      const decodedSignature = decodeSignatureIfNeeded(transferData.signature);
+      // IMPORTANT: pass the signature to the contract VERBATIM.
+      // EOA wallets return a raw 65-byte ECDSA signature, while smart wallets
+      // (Base App / Coinbase Smart Wallet) return an ABI-encoded ERC-1271
+      // signature struct. The IdRegistry's _verifyTransferAndChangeRecoverySig
+      // routes smart-contract `to` addresses through ERC-1271 isValidSignature,
+      // so the encoded blob must NOT be unwrapped/decoded here. Decoding it
+      // corrupts the signature (the previous decoder read the smart-wallet
+      // ownerIndex slot as a byte length and produced an empty `0x`, which is
+      // why the contract reverted with InvalidSignature / 0x8baa579f).
+      const signatureToSend = transferData.signature as `0x${string}`;
 
       console.log('[v0] Executing transferAndChangeRecovery with:', {
         to: transferData.recipientAddress,
@@ -525,10 +510,17 @@ export function FarcasterSignatureTool() {
         deadline: transferData.deadline,
         fid: transferData.currentFid,
         nonce: transferData.recipientNonce,
-        signature: decodedSignature,
+        signature: signatureToSend,
+        signatureLength: signatureToSend.length,
         executionMethod,
         executor: account,
       });
+
+      if (!signatureToSend || signatureToSend === '0x') {
+        throw new Error(
+          'The generated signature is empty. Please re-generate the signature in step 2 before executing.'
+        );
+      }
 
       const hash = await client.writeContract({
         address: ID_REGISTRY_ADDRESS,
@@ -538,7 +530,7 @@ export function FarcasterSignatureTool() {
           transferData.recipientAddress,
           transferData.recoveryAddress,
           BigInt(transferData.deadline),
-          decodedSignature as `0x${string}`,
+          signatureToSend,
         ],
       });
 
